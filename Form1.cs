@@ -448,7 +448,6 @@ namespace RegexTest
 
                 char current = pattern[i];
 
-
                 if (current == '\\') // Escape or Escape Anchor or Escape Metacharacter
                 {
                     length++; // The escape character
@@ -500,7 +499,7 @@ namespace RegexTest
                     {
                         color = RegexInfo.GroupingColor;
                         int nameLength = this.CountParenthesis(pattern, i + 2, '<', '>');
-                        length = nameLength + 1; // +1 for the 'P'
+                        length = nameLength + 1; // +1 for the 'k'
                     }
                     else // Simple escaped character
                     {
@@ -579,7 +578,7 @@ namespace RegexTest
                         {
                             length += this.CountParenthesis(pattern, i + 2, '(', ')');
                         }
-                        else // The only remaining is the subexpression options
+                        else if (RegexInfo.RegexOptions.Contains(after)) // Subexpression options
                         {
                             int end = pattern.IndexOf(':', i + 1);
                             length = (end - i) + 1;
@@ -587,7 +586,7 @@ namespace RegexTest
                     }
                     else // Simple numbered group
                     {
-                        length++;
+                        // No additinal character have to be marked
                     }
                 }
                 else if (current == ')')

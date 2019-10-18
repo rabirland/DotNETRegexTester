@@ -16,7 +16,7 @@ namespace RegexTest
         public static readonly char[] HexDigits = "0123456789abcdefABCDEF".ToCharArray();
         public static readonly char[] DecimalDigits = "0123456789".ToCharArray();
         public static readonly char[] Letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".ToCharArray();
-        public static readonly char[] RegexOptions = "imsnx".ToCharArray();
+        public static readonly char[] RegexOptions = "imsnxIMSNX".ToCharArray();
 
         // Colors
         public static readonly Color MetacharacterColor = Color.Green;
