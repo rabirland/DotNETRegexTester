@@ -606,7 +606,7 @@ namespace RegexTest
                     length += (end - i) + 1;
                 }
 
-                if (length > 0)
+                if (length > 0) // If we found anything interesting
                 {
                     ret.Add(new HighlightRange(color, i, length));
                     i += length - 1;
