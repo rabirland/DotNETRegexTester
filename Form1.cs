@@ -30,6 +30,8 @@ namespace RegexTest
         CheckBox _ecmaScriptCheckbox;
         CheckBox _cultureInvariantCheckbox;
 
+        ListBox _suggestionListBox;
+
         Regex _patternRegex;
         private RegexOptions _regexOptions = RegexOptions.CultureInvariant;
         bool handlingHighlight = false;
@@ -73,6 +75,13 @@ namespace RegexTest
             };
             _inputTextBox.AutoWordSelection = false;
             mainSplitContanier.Panel2.Controls.Add(_inputTextBox);
+
+            this._suggestionListBox = new ListBox();
+            _suggestionListBox.Anchor = AnchorStyles.Top | AnchorStyles.Right | AnchorStyles.Bottom;
+            _suggestionListBox.Top = _inputTextBox.Top;
+            _suggestionListBox.Left = _inputTextBox.Right + InnerMargin;
+            _suggestionListBox.Height = _inputTextBox.Height;
+            mainSplitContanier.Panel2.Controls.Add(_suggestionListBox);
 
             // Top Panel
             _ignoreCaseCheckbox = new CheckBox();
@@ -289,7 +298,7 @@ namespace RegexTest
         {
             this._resultTreeView.Nodes.Clear();
 
-            List<HighlightRange> patternRanges = null;
+            PatternAnalyseResult patternAnalysisResult = new PatternAnalyseResult();
             List<HighlightRange> inputRanges = null;
             string error = null;
             MatchCollection matches = null;
@@ -298,65 +307,61 @@ namespace RegexTest
             string input = this._inputTextBox.Text;
             Task.Run(async () =>
             {
-                if (mode >= RegexRefreshMode.ReparseOnly)
-                {
-                    try
-                    {
-                        if (!string.IsNullOrEmpty(pattern))
-                        {
-                            this._patternRegex = new Regex(pattern, this._regexOptions);
-                        }
-                        else
-                        {
-                            this._patternRegex = null;
-                        }
-                    }
-                    catch (Exception e)
-                    {
-                        error = e.Message;
-                        this._patternRegex = null;
-                    }
-                }
-
                 Task patternHighlightTask = null;
                 Task inputHighlightTask = null;
 
-                if (this._patternRegex != null)
+                inputHighlightTask = Task.Run(() =>
                 {
-                    if (mode == RegexRefreshMode.Rehighlight)
+                    if (mode >= RegexRefreshMode.ReparseOnly)
                     {
-                        patternHighlightTask = Task.Run(() => patternRanges = this.HighlightPattern(pattern));
+                        try
+                        {
+                            if (!string.IsNullOrEmpty(pattern))
+                            {
+                                this._patternRegex = new Regex(pattern, this._regexOptions);
+                                matches = this._patternRegex.Matches(input);
+                                inputRanges = this.HighlightInput(matches);
+                            }
+                            else
+                            {
+                                error = string.Empty;
+                                this._patternRegex = null;
+                            }
+                        }
+                        catch (Exception e)
+                        {
+                            error = e.Message;
+                            this._patternRegex = null;
+                        }
                     }
-
-                    inputHighlightTask = Task.Run(() =>
-                    {
-                        matches = this._patternRegex.Matches(input);
-                        inputRanges = this.HighlightInput(matches);
-                    });
+                });
+                
+                if (mode == RegexRefreshMode.Rehighlight)
+                {
+                    patternHighlightTask = Task.Run(() => patternAnalysisResult = AnalysePattern(pattern));
                 }
 
                 if (patternHighlightTask != null)
                 {
                     await patternHighlightTask;
                 }
-               
+
                 if (inputHighlightTask != null)
                 {
                     await inputHighlightTask;
                 }
+
             }).Wait();
 
-            if (this._patternRegex != null && mode == RegexRefreshMode.Rehighlight) // Highlight the pattern text
+            if (mode == RegexRefreshMode.Rehighlight) // Highlight the pattern text
             {
-                this._errorLabel.Text = string.Empty;
-
                 int ss = this._patternTextBox.SelectionStart;
                 int sl = this._patternTextBox.SelectionLength;
 
                 this._patternTextBox.SelectAll();
                 this._patternTextBox.SelectionColor = Color.Black;
 
-                foreach (var range in patternRanges)
+                foreach (var range in patternAnalysisResult.Highlights)
                 {
                     this._patternTextBox.Select(range.Start, range.Length);
                     this._patternTextBox.SelectionColor = range.Color;
@@ -364,14 +369,15 @@ namespace RegexTest
                 this._patternTextBox.Select(ss, sl);
                 this._patternTextBox.SelectionColor = Color.Black;
             }
-            else if (this._patternRegex == null && !string.IsNullOrEmpty(error)) // Color the whole pattern text to red
+
+            this._suggestionListBox.Items.Clear();
+            if (patternAnalysisResult.Suggestions != null)
             {
-                int ss = this._patternTextBox.SelectionStart;
-                int sl = this._patternTextBox.SelectionLength;
-                this._patternTextBox.SelectAll();
-                this._patternTextBox.SelectionColor = Color.Red;
-                this._patternTextBox.Select(ss, sl);
+                var validSuggestions = patternAnalysisResult.Suggestions.Where(s => s.ScopeStart <= this._patternTextBox.SelectionStart && s.ScopeStart + s.ScopeLength >= this._patternTextBox.SelectionStart).Select(s => s.Suggestion).ToArray();
+                this._suggestionListBox.Items.AddRange(validSuggestions);
             }
+            
+            this._errorLabel.Text = error;
 
             // Remove highlight from input text
             int currentSelectionStart = this._inputTextBox.SelectionStart;
@@ -437,9 +443,15 @@ namespace RegexTest
             return ret;
         }
 
-        private List<HighlightRange> HighlightPattern(string pattern)
+        private static PatternAnalyseResult AnalysePattern(string pattern)
         {
-            List<HighlightRange> ret = new List<HighlightRange>();
+            /*
+             * When I wrote this function, only god and I knew how it works...
+             * Now only god does.
+             */
+
+            List<HighlightRange> highlights = new List<HighlightRange>();
+            List<SuggestionScope> suggestions = new List<SuggestionScope>();
 
             for (int i = 0; i < pattern.Length; i++)
             {
@@ -450,61 +462,84 @@ namespace RegexTest
 
                 if (current == '\\') // Escape or Escape Anchor or Escape Metacharacter
                 {
-                    length++; // The escape character
-                    char nextChar = pattern[i + 1];
-
-                    if (RegexInfo.EscapedAncors.Contains(nextChar)) // Escaped Anchor
+                    length++; // The backslash
+                    if (pattern.Length > i + 1)
                     {
-                        color = RegexInfo.AnchorColor;
-                        length++;
+                        char nextChar = pattern[i + 1];
+                        length++; // The next character
+                        if (RegexInfo.EscapedAncors.Contains(nextChar)) // Escaped Anchor
+                        {
+                            color = RegexInfo.AnchorColor;
+                        }
+                        else if (RegexInfo.EscapeMetacharacters.Contains(nextChar)) // Escaped Metachar
+                        {
+                            color = RegexInfo.MetacharacterColor;
+                        }
+                        else if (PatternMatch(pattern, i + 1, RegexInfo.DecimalDigits, RegexInfo.DecimalDigits, RegexInfo.DecimalDigits)) // \123 (octal)
+                        {
+                            color = RegexInfo.SpecialCharacterEncodeColor;
+                            length += 3;
+                        }
+                        else if (PatternMatch(pattern, i + 1, 'x', RegexInfo.HexDigits, RegexInfo.HexDigits)) // Hex coded character
+                        {
+                            color = RegexInfo.SpecialCharacterEncodeColor;
+                            length += 2;
+                        }
+                        else if (PatternMatch(pattern, i + 1, 'c', RegexInfo.Letters)) // Followed by an ASCII control character's letter
+                        {
+                            color = RegexInfo.SpecialCharacterEncodeColor;
+                            length++;
+                        }
+                        else if (PatternMatch(pattern, i + 1, 'u', RegexInfo.HexDigits, RegexInfo.HexDigits, RegexInfo.HexDigits, RegexInfo.HexDigits)) // \u 1234 Unicode character
+                        {
+                            color = RegexInfo.SpecialCharacterEncodeColor;
+                            length += 4;
+                        }
+                        else if (nextChar == 'p') // \p{name} Name of unicode character group or unicode block
+                        {
+                            color = RegexInfo.SpecialCharacterEncodeColor;
+                            int nameLength = CountParenthesis(pattern, i + 2, '}');
+                            length += nameLength; // +1 for the 'P'
+                        }
+                        else if (nextChar == 'P') // \p{name} Name of unicode character group or unicode block to NOT match
+                        {
+                            color = RegexInfo.SpecialCharacterEncodeColor;
+                            int nameLength = CountParenthesis(pattern, i + 2, '}');
+                            length += nameLength;// +1 for the 'P'
+                        }
+                        else if (nextChar == 'k') // \k<name> Named backreference
+                        {
+                            color = RegexInfo.GroupingColor;
+                            int nameLength = CountParenthesis(pattern, i + 2, '>', out bool isClosed);
+                            length += nameLength; // +1 for the 'k'
+
+                            if (!isClosed) // +1 because of the 'k'
+                            {
+                                suggestions.AddRange(FindAllGroupName(pattern).Select(g => new SuggestionScope(i, length, g)));
+                            }
+                        }
+                        else // Simple escaped character
+                        {
+                            color = RegexInfo.EscapedCharacterEncodeColor;
+                            // Length already increased
+                        }
                     }
-                    else if (RegexInfo.EscapeMetacharacters.Contains(nextChar)) // Escaped Metachar
+                    else
                     {
                         color = RegexInfo.MetacharacterColor;
-                        length++;
-                    }
-                    else if (this.PatternMatch(pattern, i + 1, RegexInfo.DecimalDigits, RegexInfo.DecimalDigits, RegexInfo.DecimalDigits)) // \123 (octal)
-                    {
-                        color = RegexInfo.SpecialCharacterEncodeColor;
-                        length += 4;
-                    }
-                    else if (this.PatternMatch(pattern, i + 1, 'x', RegexInfo.HexDigits, RegexInfo.HexDigits)) // Hex coded character
-                    {
-                        color = RegexInfo.SpecialCharacterEncodeColor;
-                        length += 3;
-                    }
-                    else if (this.PatternMatch(pattern, i + 1, 'c', RegexInfo.Letters)) // Followed by an ASCII control character's letter
-                    {
-                        color = RegexInfo.SpecialCharacterEncodeColor;
-                        length += 2;
-                    }
-                    else if (this.PatternMatch(pattern, i + 1, 'u', RegexInfo.HexDigits, RegexInfo.HexDigits, RegexInfo.HexDigits, RegexInfo.HexDigits)) // \u 1234 Unicode character
-                    {
-                        color = RegexInfo.SpecialCharacterEncodeColor;
-                        length += 5;
-                    }
-                    else if (nextChar == 'p') // \p{name} Name of unicode character group or unicode block
-                    {
-                        color = RegexInfo.SpecialCharacterEncodeColor;
-                        int nameLength = this.CountParenthesis(pattern, i + 2, '{', '}');
-                        length = nameLength + 1; // +1 for the 'P'
-                    }
-                    else if (nextChar == 'P') // \p{name} Name of unicode character group or unicode block to NOT match
-                    {
-                        color = RegexInfo.SpecialCharacterEncodeColor;
-                        int nameLength = this.CountParenthesis(pattern, i + 2, '{', '}');
-                        length = nameLength + 1; // +1 for the 'P'
-                    }
-                    else if (nextChar == 'k') // \k<name> Named backreference
-                    {
-                        color = RegexInfo.GroupingColor;
-                        int nameLength = this.CountParenthesis(pattern, i + 2, '<', '>');
-                        length = nameLength + 1; // +1 for the 'k'
-                    }
-                    else // Simple escaped character
-                    {
-                        color = RegexInfo.EscapedCharacterEncodeColor;
-                        length++;
+                        length = int.MaxValue;
+
+                        // Add all escaped character suggestion
+                        suggestions.AddRange(RegexInfo.EscapeSpecialCharacters.Select(c => new SuggestionScope(i, length, EscapeCharacterSuggestion(c))));
+                        suggestions.AddRange(RegexInfo.EscapedAncors.Select(c => new SuggestionScope(i, length, EscapeCharacterSuggestion(c))));
+                        suggestions.AddRange(RegexInfo.EscapeMetacharacters.Select(c => new SuggestionScope(i, length, EscapeCharacterSuggestion(c))));
+                        
+                        suggestions.Add(new SuggestionScope(i, length, EscapeCharacterSuggestion('x')));
+                        suggestions.Add(new SuggestionScope(i, length, EscapeCharacterSuggestion('c')));
+                        suggestions.Add(new SuggestionScope(i, length, EscapeCharacterSuggestion('u')));
+                        suggestions.Add(new SuggestionScope(i, length, EscapeCharacterSuggestion('\\')));
+                        suggestions.Add(new SuggestionScope(i, length, EscapeCharacterSuggestion('p')));
+                        suggestions.Add(new SuggestionScope(i, length, EscapeCharacterSuggestion('P')));
                     }
                 }
                 else if (RegexInfo.SingularAnchors.Contains(current)) // Singular anchor
@@ -525,8 +560,17 @@ namespace RegexTest
                      * {n,}
                      */
                     int end = pattern.IndexOf('}', i + 1);
-                    color = RegexInfo.QuantifierColor;
-                    length += (end - i) + 1;
+                    if (end > 0) // The quantifier is closed
+                    {
+                        color = RegexInfo.QuantifierColor;
+                        length += (end - i) + 1;
+                    }
+                    else // The quantifier is not closed
+                    {
+                        color = RegexInfo.QuantifierColor;
+                        length = int.MaxValue;
+                        suggestions.AddRange(RegexInfo.QuantifierDescriptions.Select(d => new SuggestionScope(i, length, d)));
+                    }
                 }
                 else if (current == '(') // Group start
                 {
@@ -537,7 +581,9 @@ namespace RegexTest
                      * (?<Name>         Named group
                      * (?'Name'         Named group
                      * (?=              Positive lookahead
+                     * (?<=             Zero width Positive lookahead
                      * (?!              Negative lookahead
+                     * (?<!             Zero width Negative lookahead
                      * (?imnsx-imnsx:   Disables options in subexpression
                      * (?>              Non-backtracking (greedy) subexpression
                      * (?(xyz)yes|no)   If 'xyz' group has a match, matches 'yes' otherwise matches 'no'
@@ -545,49 +591,75 @@ namespace RegexTest
 
                     length++; // The '(' character
                     color = RegexInfo.GroupingColor;
-                    char next = pattern[i + 1];
-                    if (next == '?')
+                    char next;
+                    if (i + 1 < pattern.Length && (next = pattern[i + 1]) == '?')
                     {
                         length++; // The '?' character
-                        char after = pattern[i + 2];
-                        if (after == ':') // Non capturing group
+                        if (i + 2 < pattern.Length)
                         {
-                            length++; // The ':' character
+                            char after = pattern[i + 2];
+
+                            if (after == ':') // Non capturing group
+                            {
+                                length++; // The ':' character
+                            }
+                            else if (after == '<') // Named group
+                            {
+                                char tester;
+                                if (i + 3 < pattern.Length && ((tester = pattern[i + 3]) == '=' || tester == '!')) // Zero width positive/negative lookahead
+                                {
+                                    length++;
+                                }
+                                else
+                                {
+                                    length += CountParenthesis(pattern, i + 2, '>');
+                                    if (i + length >= pattern.Length) // The < is not closed => end of string
+                                    {
+                                        suggestions.Add(new SuggestionScope(i, length, RegexInfo.NamedGroup1Description));
+                                    }
+                                }
+                            }
+                            else if (after == '\'') // Named group
+                            {
+                                length += CountParenthesis(pattern, i + 2, '\'');
+                                if (i + length >= pattern.Length) // The < is not closed => end of string
+                                {
+                                    suggestions.Add(new SuggestionScope(i, length, RegexInfo.NamedGroup2Description));
+                                }
+                            }
+                            else if (after == '=') // Positive lookahead
+                            {
+                                length++;
+                            }
+                            else if (after == '!') // Negative lookahead
+                            {
+                                length++;
+                            }
+                            else if (after == '>') // Greedy subexpression
+                            {
+                                length++;
+                            }
+                            else if (after == '(') // Conditinal
+                            {
+                                length += CountParenthesis(pattern, i + 2, ')');
+                            }
+                            else if (RegexInfo.RegexOptions.Contains(after)) // Subexpression options
+                            {
+                                int end = pattern.IndexOf(':', i + 1);
+                                length = (end - i) + 1;
+                            }
                         }
-                        else if(after == '<') // Named group
+                        else
                         {
-                            length += this.CountParenthesis(pattern, i + 2, '<', '>');
-                        }
-                        else if (after == '\'') // Named group
-                        {
-                            length += this.CountParenthesis(pattern, i + 2, '\'', '\'');
-                        }
-                        else if (after == '=') // Positive lookahead
-                        {
-                            length++;
-                        }
-                        else if (after == '!') // Negative lookahead
-                        {
-                            length++;
-                        }
-                        else if (after == '>') // Greedy subexpression
-                        {
-                            length++;
-                        }
-                        else if (after == '(') // Conditinal
-                        {
-                            length += this.CountParenthesis(pattern, i + 2, '(', ')');
-                        }
-                        else if (RegexInfo.RegexOptions.Contains(after)) // Subexpression options
-                        {
-                            int end = pattern.IndexOf(':', i + 1);
-                            length = (end - i) + 1;
+                            length = int.MaxValue;
                         }
                     }
                     else // Simple numbered group
                     {
                         // No additinal character have to be marked
                     }
+
+                    suggestions.AddRange(GetGroupingDefinitions(pattern, i).Select(d => new SuggestionScope(i, length, d)));
                 }
                 else if (current == ')')
                 {
@@ -603,20 +675,29 @@ namespace RegexTest
                      */
                     color = RegexInfo.CharacterGroupColor;
                     int end = pattern.IndexOf(']', i + 1);
-                    length += (end - i) + 1;
+                    if (end > 0)
+                    {
+                        length += (end - i) + 1;
+                    }
+                    else
+                    {
+                        length = int.MaxValue;
+                        suggestions.AddRange(RegexInfo.CharacterGroupDescriptions.Select(d => new SuggestionScope(i, length, d)));
+                    }
                 }
 
                 if (length > 0) // If we found anything interesting
                 {
-                    ret.Add(new HighlightRange(color, i, length));
-                    i += length - 1;
+                    int trueLength = Math.Min(length, pattern.Length - i);
+                    highlights.Add(new HighlightRange(color, i, trueLength));
+                    i += trueLength - 1;
                 }
             }
 
-            return ret;
+            return new PatternAnalyseResult(highlights, suggestions);
         }
 
-        private bool PatternMatch(string input, int index, params object[] patternElements)
+        private static bool PatternMatch(string input, int index, params object[] patternElements)
         {
             if (index + patternElements.Length <= input.Length)
             {
@@ -655,35 +736,45 @@ namespace RegexTest
             }
         }
 
-        private int CountParenthesis(string input, int index, char open, char close)
+        private static int CountParenthesis(string input, int index, char close)
         {
-            if (input[index] == open)
-            {
-                int level = 0;
-                for (int i = index + 1; i < input.Length; i++)
-                {
-                    if (input[i] == open && open != close)
-                    {
-                        level++;
-                    }
-                    else if (input[i] == close)
-                    {
-                        if (level == 0)
-                        {
-                            return (i - index) + 1; // +1 for the open and close parenthesis
-                        }
-                        else
-                        {
-                            level--;
-                        }
-                    }
-                }
+            return CountParenthesis(input, index, close, out bool isClosed);
+        }
 
-                return -1;
-            }
-            else
+        private static int CountParenthesis(string input, int index, char close, out bool isClosed)
+        {
+            int end = index + 1 < input.Length ? input.IndexOf(close, index + 1) : -1;
+            isClosed = end >= 0;
+            if (end < 0) end = input.Length;
+            int actualEnd = index + 1;
+            while (actualEnd < input.Length && RegexInfo.Letters.Contains(input[actualEnd]))
             {
-                return 0;
+                actualEnd++;
+            }
+            return (actualEnd - index) + 1;
+        }
+
+        private static string EscapeCharacterSuggestion(char ch)
+        {
+            return $"\\{ch} - {RegexInfo.EscapedCharacterDescriptions[ch]}";
+        }
+
+        private static IEnumerable<string> GetGroupingDefinitions(string pattern, int start)
+        {
+            string groupingStart = pattern.Substring(start);
+            return RegexInfo.GroupingDescriptions.Where(d => d.StartsWith(groupingStart));
+        }
+
+        private static IEnumerable<string> FindAllGroupName(string pattern)
+        {
+            var matches = RegexInfo.GroupNameRegex.Matches(pattern);
+            foreach (var match in matches)
+            {
+                var m = (Match)match;
+                if (m.Success)
+                {
+                    yield return $"Group: {m.Groups["Name"].Value}";
+                }
             }
         }
 
@@ -708,6 +799,35 @@ namespace RegexTest
             None = 0,
             ReparseOnly = 1,
             Rehighlight = 2
+        }
+
+        private struct PatternAnalyseResult
+        {
+            public List<HighlightRange> Highlights { get; }
+
+            public List<SuggestionScope> Suggestions { get; }
+
+            public PatternAnalyseResult(List<HighlightRange> highlights, List<SuggestionScope> suggestions)
+            {
+                this.Highlights = highlights;
+                this.Suggestions = suggestions;
+            }
+        }
+
+        private struct SuggestionScope
+        {
+            public string Suggestion { get; }
+
+            public int ScopeStart { get; }
+
+            public int ScopeLength { get; }
+
+            public SuggestionScope(int start, int length, string suggestion)
+            {
+                this.ScopeStart = start;
+                this.ScopeLength = length;
+                this.Suggestion = suggestion;
+            }
         }
     }
 }
