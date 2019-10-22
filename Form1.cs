@@ -35,6 +35,7 @@ namespace RegexTest
         Regex _patternRegex;
         private RegexOptions _regexOptions = RegexOptions.CultureInvariant;
         bool handlingHighlight = false;
+        private List<SuggestionScope> _suggestions = null;
 
         public Form1()
         {
@@ -290,6 +291,10 @@ namespace RegexTest
                 }
                 
             };
+            _patternTextBox.SelectionChanged += (o, e) =>
+            {
+                this.RefreshSuggestions();
+            };
             _patternTextBox.AutoWordSelection = false;
             topSplitContainer.Panel2.Controls.Add(_patternTextBox);
         }
@@ -370,13 +375,9 @@ namespace RegexTest
                 this._patternTextBox.SelectionColor = Color.Black;
             }
 
-            this._suggestionListBox.Items.Clear();
-            if (patternAnalysisResult.Suggestions != null)
-            {
-                var validSuggestions = patternAnalysisResult.Suggestions.Where(s => s.ScopeStart <= this._patternTextBox.SelectionStart && s.ScopeStart + s.ScopeLength >= this._patternTextBox.SelectionStart).Select(s => s.Suggestion).ToArray();
-                this._suggestionListBox.Items.AddRange(validSuggestions);
-            }
-            
+            this._suggestions = patternAnalysisResult.Suggestions;
+            this.RefreshSuggestions();
+
             this._errorLabel.Text = error;
 
             // Remove highlight from input text
@@ -443,6 +444,16 @@ namespace RegexTest
             return ret;
         }
 
+        private void RefreshSuggestions()
+        {
+            this._suggestionListBox.Items.Clear();
+            if (this._suggestions != null)
+            {
+                var validSuggestions = this._suggestions.Where(s => s.ScopeStart <= this._patternTextBox.SelectionStart && s.ScopeStart + s.ScopeLength >= this._patternTextBox.SelectionStart).Select(s => s.Suggestion).ToArray();
+                this._suggestionListBox.Items.AddRange(validSuggestions);
+            }
+        }
+
         private static PatternAnalyseResult AnalysePattern(string pattern)
         {
             /*
@@ -498,24 +509,24 @@ namespace RegexTest
                         else if (nextChar == 'p') // \p{name} Name of unicode character group or unicode block
                         {
                             color = RegexInfo.SpecialCharacterEncodeColor;
-                            int nameLength = CountParenthesis(pattern, i + 2, '}');
+                            int nameLength = CountParenthesis(pattern, i + 2, '{', '}');
                             length += nameLength; // +1 for the 'P'
                         }
                         else if (nextChar == 'P') // \p{name} Name of unicode character group or unicode block to NOT match
                         {
                             color = RegexInfo.SpecialCharacterEncodeColor;
-                            int nameLength = CountParenthesis(pattern, i + 2, '}');
+                            int nameLength = CountParenthesis(pattern, i + 2, '{', '}');
                             length += nameLength;// +1 for the 'P'
                         }
                         else if (nextChar == 'k') // \k<name> Named backreference
                         {
                             color = RegexInfo.GroupingColor;
-                            int nameLength = CountParenthesis(pattern, i + 2, '>', out bool isClosed);
+                            int nameLength = CountParenthesis(pattern, i + 2, '<', '>', out bool isClosed);
                             length += nameLength; // +1 for the 'k'
 
                             if (!isClosed) // +1 because of the 'k'
                             {
-                                suggestions.AddRange(FindAllGroupName(pattern).Select(g => new SuggestionScope(i, length, g)));
+                                suggestions.AddRange(FindAllGroupName(pattern).Select(g => new SuggestionScope(i + 2, nameLength, g))); // Only scope it from the start of < to the end
                             }
                         }
                         else // Simple escaped character
@@ -608,23 +619,25 @@ namespace RegexTest
                                 char tester;
                                 if (i + 3 < pattern.Length && ((tester = pattern[i + 3]) == '=' || tester == '!')) // Zero width positive/negative lookahead
                                 {
-                                    length++;
+                                    length++; // The '<' character
+                                    length++; // The trailing (= or !) character
                                 }
                                 else
                                 {
-                                    length += CountParenthesis(pattern, i + 2, '>');
-                                    if (i + length >= pattern.Length) // The < is not closed => end of string
+                                    int nameLength = CountParenthesis(pattern, i + 2, '<', '>', out bool isClosed);
+                                    length += nameLength;
+                                    if (!isClosed) // The < is not closed => end of string
                                     {
-                                        suggestions.Add(new SuggestionScope(i, length, RegexInfo.NamedGroup1Description));
+                                        suggestions.Add(new SuggestionScope(i + 2, nameLength, RegexInfo.NamedGroup1Description));
                                     }
                                 }
                             }
                             else if (after == '\'') // Named group
                             {
-                                length += CountParenthesis(pattern, i + 2, '\'');
-                                if (i + length >= pattern.Length) // The < is not closed => end of string
+                                length += CountParenthesis(pattern, i + 2, '\'', '\'', out bool isClosed);
+                                if (!isClosed) // The < is not closed => end of string
                                 {
-                                    suggestions.Add(new SuggestionScope(i, length, RegexInfo.NamedGroup2Description));
+                                    suggestions.Add(new SuggestionScope(i + 2, length, RegexInfo.NamedGroup2Description));
                                 }
                             }
                             else if (after == '=') // Positive lookahead
@@ -641,7 +654,7 @@ namespace RegexTest
                             }
                             else if (after == '(') // Conditinal
                             {
-                                length += CountParenthesis(pattern, i + 2, ')');
+                                length += CountParenthesis(pattern, i + 2, '(', ')');
                             }
                             else if (RegexInfo.RegexOptions.Contains(after)) // Subexpression options
                             {
@@ -736,21 +749,35 @@ namespace RegexTest
             }
         }
 
-        private static int CountParenthesis(string input, int index, char close)
+        private static int CountParenthesis(string input, int index, char open, char close)
         {
-            return CountParenthesis(input, index, close, out bool isClosed);
+            return CountParenthesis(input, index, open, close, out bool isClosed);
         }
 
-        private static int CountParenthesis(string input, int index, char close, out bool isClosed)
+        private static int CountParenthesis(string input, int index, char open, char close, out bool isClosed)
         {
-            int end = index + 1 < input.Length ? input.IndexOf(close, index + 1) : -1;
-            isClosed = end >= 0;
-            if (end < 0) end = input.Length;
+            if (index >= input.Length || input[index] != open)
+            {
+                isClosed = false;
+                return 0;
+            }
+
             int actualEnd = index + 1;
             while (actualEnd < input.Length && RegexInfo.Letters.Contains(input[actualEnd]))
             {
                 actualEnd++;
             }
+
+            if (actualEnd >= input.Length || input[actualEnd] != close)
+            {
+                isClosed = false;
+                actualEnd--;
+            }
+            else
+            {
+                isClosed = true;
+            }
+
             return (actualEnd - index) + 1;
         }
 
